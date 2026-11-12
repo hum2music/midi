@@ -1,5 +1,5 @@
 import type { NoteEvent } from "@hum2music/core";
-import type { MidiNoteEvent } from "./smf-writer";
+import type { MidiNoteEvent } from "./smf-writer.ts";
 
 /**
  * Converts beat-relative `NoteEvent`s (as produced by quantization/

@@ -1,2 +1,2 @@
-export * from "./smf-writer";
-export * from "./note-event-adapter";
+export * from "./smf-writer.ts";
+export * from "./note-event-adapter.ts";
