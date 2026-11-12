@@ -1,3 +1,5 @@
+import type { TempoChange } from "@hum2music/core";
+
 export interface MidiPitchCurveSample {
   offsetMs: number;
   cents: number;
@@ -15,6 +17,17 @@ export interface WriteSmfOptions {
   ppq?: number;
   bpm?: number;
   channel?: number;
+  /**
+   * Tempo changes partway through the piece (e.g. a terminal ritardando
+   * tied to song structure, see @hum2music/expression's
+   * deriveSectionTempoCurve). Note timing (`startMs`/`durationMs` on each
+   * `MidiNoteEvent`) is still laid out assuming the constant `bpm` above —
+   * ticks are a fixed representation of beat position regardless of
+   * tempo, so this only changes how a MIDI player maps those ticks to
+   * wall-clock time during playback, not where the notes themselves sit.
+   * Omit for a single constant tempo (the default, unchanged behavior).
+   */
+  tempoChanges?: TempoChange[];
 }
 
 const DEFAULT_PPQ = 480;
@@ -27,7 +40,7 @@ export function writeStandardMidiFile(notes: MidiNoteEvent[], options: WriteSmfO
   const microsecondsPerQuarter = Math.round(60_000_000 / bpm);
 
   const header = buildHeaderChunk(1, 2, ppq);
-  const tempoTrack = buildTempoTrack(microsecondsPerQuarter);
+  const tempoTrack = buildTempoTrack(ppq, bpm, options.tempoChanges);
   const melodyTrack = buildNoteTrack(notes, ppq, microsecondsPerQuarter, channel);
 
   return concatBytes([header, tempoTrack, melodyTrack]);
@@ -51,7 +64,7 @@ export function writeMultiTrackMidiFile(tracks: MidiTrack[], options: WriteSmfOp
   const microsecondsPerQuarter = Math.round(60_000_000 / bpm);
 
   const header = buildHeaderChunk(1, 1 + tracks.length, ppq);
-  const tempoTrack = buildTempoTrack(microsecondsPerQuarter);
+  const tempoTrack = buildTempoTrack(ppq, bpm, options.tempoChanges);
   const noteTracks = tracks.map((track, index) =>
     buildNoteTrack(track.notes, ppq, microsecondsPerQuarter, track.channel ?? index, track.programNumber),
   );
@@ -70,19 +83,38 @@ function buildHeaderChunk(format: number, numTracks: number, ppq: number): Uint8
   return chunk;
 }
 
-function buildTempoTrack(microsecondsPerQuarter: number): Uint8Array {
-  const tempoEvent = [
-    0x00,
-    0xff,
-    0x51,
-    0x03,
-    (microsecondsPerQuarter >> 16) & 0xff,
-    (microsecondsPerQuarter >> 8) & 0xff,
-    microsecondsPerQuarter & 0xff,
-  ];
+/**
+ * Emits one Set Tempo meta event per entry in `tempoChanges` (falling back
+ * to a single constant-tempo event when omitted/empty), at the tick
+ * corresponding to each change's `atBeat` — this is how a tempo curve
+ * (e.g. a terminal ritardando) is actually represented in a Standard MIDI
+ * File: ticks stay a fixed grid of beat positions, and playback speed
+ * changes only by what Set Tempo event is most recently in effect.
+ */
+function buildTempoTrack(ppq: number, baseBpm: number, tempoChanges?: TempoChange[]): Uint8Array {
+  const changes = tempoChanges && tempoChanges.length > 0 ? tempoChanges : [{ atBeat: 0, bpm: baseBpm }];
+  const sortedChanges = [...changes].sort((a, b) => a.atBeat - b.atBeat);
+
+  const events: number[] = [];
+  let lastTick = 0;
+  for (const change of sortedChanges) {
+    const tick = Math.max(0, Math.round(change.atBeat * ppq));
+    const microsecondsPerQuarter = Math.round(60_000_000 / change.bpm);
+    events.push(
+      ...encodeVariableLengthQuantity(Math.max(0, tick - lastTick)),
+      0xff,
+      0x51,
+      0x03,
+      (microsecondsPerQuarter >> 16) & 0xff,
+      (microsecondsPerQuarter >> 8) & 0xff,
+      microsecondsPerQuarter & 0xff,
+    );
+    lastTick = tick;
+  }
+
   const timeSignatureEvent = [0x00, 0xff, 0x58, 0x04, 4, 2, 24, 8];
   const endOfTrack = [0x00, 0xff, 0x2f, 0x00];
-  return wrapTrackChunk(new Uint8Array([...tempoEvent, ...timeSignatureEvent, ...endOfTrack]));
+  return wrapTrackChunk(new Uint8Array([...events, ...timeSignatureEvent, ...endOfTrack]));
 }
 
 function buildNoteTrack(
